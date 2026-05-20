@@ -1,0 +1,244 @@
+/*
+===============================================================================
+Stored Procedure: Load Silver Layer (Bronze -> Silver)
+===============================================================================
+Script Purpose:
+    This stored procedure performs the ETL (Extract, Transform, Load) process to 
+    populate the 'silver' schema tables from the 'bronze' schema.
+	Actions Performed:
+		- Truncates Silver tables.
+		- Inserts transformed and cleansed data from Bronze into Silver tables.
+		
+Parameters:
+    None. 
+	  This stored procedure does not accept any parameters or return any values.
+
+Usage Example:
+    EXEC Silver.load_silver;
+===============================================================================
+*/
+
+create or alter procedure silver.load_silver as
+begin
+    declare @start_time datetime, @end_time datetime, @batch_start_time datetime, @batch_end_time datetime;
+	begin try
+		set @batch_start_time = getdate();
+		print '======================================';
+		print 'Loading silver Layer';
+		print '======================================';
+	
+		print '--------------------------------------';
+		print 'Loading CRM tables';
+		print '--------------------------------------';
+
+		set @start_time = getdate();
+		print '>> Truncating Table: silver.crm_cust_info';
+		truncate table silver.crm_cust_info;
+
+		print '>> Inserting Data Into: silver.crm_cust_info';
+		INSERT INTO silver.crm_cust_info (
+			 cst_id,
+			 cst_key,
+			 cst_firstname,
+			 cst_lastname,
+			 cst_marital_status,
+			 cst_gndr,
+			 cst_create_date
+			)
+		SELECT cst_id,
+			cst_key,
+			trim(cst_firstname) AS cst_firstname,
+			trim(cst_lastname) AS cst_lastname,
+			CASE 
+				WHEN UPPER(trim(cst_marital_status)) = 'S'
+					THEN 'Single'
+				WHEN UPPER(trim(cst_marital_status)) = 'M'
+					THEN 'Married'
+				ELSE 'n/a'
+				END cst_marital_status,
+			CASE 
+				WHEN UPPER(trim(cst_gndr)) = 'F'
+					THEN 'Female'
+				WHEN UPPER(trim(cst_gndr)) = 'M'
+					THEN 'Male'
+				ELSE 'n/a'
+				END cst_gndr,
+			cst_create_date
+		FROM (
+			SELECT *
+				,ROW_NUMBER() OVER (
+					PARTITION BY cst_id ORDER BY cst_create_date DESC
+					) AS flag_last
+			FROM bronze.crm_cust_info
+			WHERE cst_id IS NOT NULL
+			) t
+		WHERE flag_last = 1;
+		set @end_time = GETDATE(); 
+		print '>> Load Duration: ' + cast(datediff(second, @start_time, @end_time) as nvarchar) + 'seconds';
+		print '>> --------------'
+
+		set @start_time = getdate();
+		print '>> Truncating Table: silver.crm_prd_info';
+		truncate table silver.crm_prd_info;
+
+		print '>> Inserting Data Into: silver.crm_prd_info';
+		insert into silver.crm_prd_info (
+			prd_id ,
+			cat_id ,
+			prd_key,
+			prd_nm ,
+			prd_cost,
+			prd_line,
+			prd_start_dt,
+			prd_end_dt 
+		)
+		select prd_id,
+			replace(SUBSTRING(prd_key, 1, 5),'-','_') as cat_id,
+			SUBSTRING(prd_key, 7, LEN(prd_key)) as prd_key,
+			prd_nm,
+			isnull(prd_cost,0),
+			case when upper(trim(prd_line)) = 'M' then 'Mountain'
+				 when upper(trim(prd_line)) = 'R' then 'Road'
+				 when upper(trim(prd_line)) = 'S' then 'Other Sales'
+				 when upper(trim(prd_line)) = 'T' then 'Touring'
+			else 'n/a'
+			end prd_line,
+			cast(prd_start_dt as date) as prd_start_dt,
+			cast(dateadd(day, -1, (lead(prd_start_dt) over (partition by prd_key order by prd_start_dt))) as Date) as prd_end_dt
+		from bronze.crm_prd_info
+		set @end_time = GETDATE(); 
+		print '>> Load Duration: ' + cast(datediff(second, @start_time, @end_time) as nvarchar) + 'seconds';
+		print '>> --------------'
+
+		set @start_time = getdate();
+		print '>> Truncating Table: silver.crm_sales_details';
+		truncate table silver.crm_sales_details;
+
+		print '>> Inserting Data Into: silver.crm_sales_details';
+		insert into silver.crm_sales_details(
+			sls_ord_num,
+			sls_prd_key,
+			sls_cust_id,
+			sls_order_dt,
+			sls_ship_dt,
+			sls_due_dt,
+			sls_sales,
+			sls_quantity,
+			sls_price
+		)
+
+
+		select sls_ord_num,
+			sls_prd_key,
+			sls_cust_id,
+			case when sls_order_dt <= 0 or len(sls_order_dt) != 8 then NULL
+				 else  cast(cast(sls_order_dt as varchar) as date)
+			end as sls_order_dt,
+			case when sls_ship_dt <= 0 or len(sls_ship_dt) != 8 then NULL
+				 else cast(cast(sls_ship_dt as varchar) as date) 
+			end as sls_ship_dt,
+			case when sls_due_dt <= 0 or len(sls_due_dt) != 8 then NULL
+				 else cast(cast(sls_due_dt as varchar) as date) 
+			end as sls_due_dt,
+			case when sls_sales is null or sls_sales <= 0 or sls_sales != sls_quantity * sls_price  then sls_quantity * abs(sls_price)
+			 else sls_sales
+			end sls_sales,
+			sls_quantity,
+			case when sls_price is null or sls_price <= 0 then sls_sales / nullif(sls_quantity,0)
+			else sls_price 
+			end sls_price
+		from bronze.crm_sales_details
+		set @end_time = GETDATE(); 
+		print '>> Load Duration: ' + cast(datediff(second, @start_time, @end_time) as nvarchar) + 'seconds';
+		print '>> --------------'
+
+		print '--------------------------------------';
+		print 'Loading ERP tables';
+		print '--------------------------------------';
+
+		set @start_time = getdate();
+		print '>> Truncating Table: silver.erp_PX_CAT_G1V2';
+		truncate table silver.erp_PX_CAT_G1V2;
+
+		print '>> Inserting Data Into: silver.erp_PX_CAT_G1V2';
+		insert into silver.erp_PX_CAT_G1V2(
+		ID,
+		CAT,
+		SUBCAT,
+		MAINTENANCE
+		)
+
+		select ID,
+		CAT,
+		SUBCAT,
+		MAINTENANCE 
+		from bronze.erp_PX_CAT_G1V2
+		set @end_time = GETDATE(); 
+		print '>> Load Duration: ' + cast(datediff(second, @start_time, @end_time) as nvarchar) + 'seconds';
+		print '>> --------------'
+
+		set @start_time = getdate();
+		print '>> Truncating Table: silver.erp_LOC_A101';
+
+		print '>> Inserting Data Into: silver.erp_LOC_A101';
+		truncate table silver.erp_LOC_A101;
+		insert into silver.erp_LOC_A101(
+			CID,
+			CNTRY
+		)
+
+		select 
+		replace(CID, '-', ''),
+		case when upper(trim(CNTRY)) in ('DE', 'GERMANY') then  'Germany'
+			 when upper(trim(CNTRY)) in ('USA', 'UNITED STATES', 'US') then 'United States'
+			 when CNTRY is null or trim(CNTRY) = '' then 'n/a'
+			 else trim(CNTRY)
+		end as CNTRY
+		from bronze.erp_LOC_A101
+		set @end_time = GETDATE(); 
+		print '>> Load Duration: ' + cast(datediff(second, @start_time, @end_time) as nvarchar) + 'seconds';
+		print '>> --------------'
+
+		set @start_time = getdate();
+		print '>> Truncating Table: silver.erp_CUST_AZ12';
+		truncate table bronze.erp_CUST_AZ12;
+
+		print '>> Inserting Data Into: silver.erp_CUST_AZ12';
+		insert into silver.erp_CUST_AZ12(
+			CID,
+			BDATE,
+			GEN
+		)
+		select 
+		case when CID like 'NAS%' then substring(CID, 4, len(CID))
+			 else CID
+		end as CID,
+		case when BDATE > getdate() then NULL
+			 else BDATE 
+		end as BDATE,
+		case when upper(trim(GEN)) in ('M', 'MALE') then 'Male'
+			 when upper(trim(GEN)) in ('F', 'FEMALE') then 'Female'
+			 else 'n/a'
+		end GEN
+		from bronze.erp_CUST_AZ12
+		set @end_time = GETDATE(); 
+		print '>> Load Duration: ' + cast(datediff(second, @start_time, @end_time) as nvarchar) + 'seconds';
+		print '>> --------------'
+
+		set @batch_end_time = getdate();
+		print '======================================';
+		print 'Loading Bronze Layer is Completed:';
+		print 'Totl Load Duration: ' + cast(datediff(second, @batch_start_time, @batch_end_time) as nvarchar) + 'seconds';
+		print '======================================';
+	end try
+	begin catch
+		print '======================================';
+		print 'ERROR OCCURS DURING LOADING SILVER LAYER';
+		print 'Error Message' + ERROR_MESSAGE();
+		print 'Error Message' + CAST(ERROR_NUMBER() AS NVARCHAR);
+		print 'Error Message' + CAST(ERROR_STATE() AS NVARCHAR);
+		print '======================================';
+
+	end catch
+end
+
