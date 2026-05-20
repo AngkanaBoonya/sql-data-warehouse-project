@@ -9,6 +9,9 @@ Script Purpose:
 ===============================================================================
 */
 
+
+
+
 if object_id ('silver.crm_cust_info', 'U') is not null
 	drop table silver.crm_cust_info;
 go
